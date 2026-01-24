@@ -1,0 +1,27 @@
+name: TorTestApp
+options:
+  bundleIdPrefix: com.example
+targets:
+  TorTestApp:
+    type: application
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: Source
+    resources:
+      - path: tor
+      - path: torrc
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.TorTestApp
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: TorTestApp.entitlements
+      configs:
+        Debug:
+          ENABLE_HARDENED_RUNTIME: true
+        Release:
+          ENABLE_HARDENED_RUNTIME: true
+entitlements:
+  com.apple.security.app-sandbox: true
+  com.apple.security.network.client: true
+
