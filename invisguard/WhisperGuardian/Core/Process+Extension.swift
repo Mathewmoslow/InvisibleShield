@@ -2,22 +2,23 @@ import Foundation
 
 extension Process {
     @discardableResult
-    func runCommand(_ command: String) -> String {
+    static func execute(_ command: String) -> String {
         let task = Process()
-        task.launchPath = "/bin/zsh"
+        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
         task.arguments = ["-c", command]
-        
+
         let pipe = Pipe()
         task.standardOutput = pipe
-        
+        task.standardError = pipe
+
         do {
             try task.run()
             task.waitUntilExit()
-            
+
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
-            return "Error: \(error.localizedDescription)"
+            return ""
         }
     }
 }

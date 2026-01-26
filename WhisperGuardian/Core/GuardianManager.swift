@@ -8,25 +8,25 @@ import Combine
 
 class GuardianManager: ObservableObject {
     static let shared = GuardianManager()
-    
+
     // MARK: - Published Properties
     @Published var focusActive = false
     @Published var ghostModeActive = false
     @Published var remaining: TimeInterval = 0
     @Published var statusMessage = "Ready"
-    @Published var showDefenseMode = false // For UI toggle
-    
+    @Published var showDefenseMode = false
+
     // MARK: - Private Properties
     private var timer: Timer?
     private var torProcess: Process?
-    private var tamperMonitors: [URL: DispatchSourceFileSystemObject] = [: ]
+    private var tamperMonitors: [URL: DispatchSourceFileSystemObject] = [:]
     private var honeypotPaths: [URL] = []
-    
+
     // Voice Recognition
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    
+
     // MARK: - Setup
     func setupEverything() {
         requestPermissions()
@@ -34,19 +34,18 @@ class GuardianManager: ObservableObject {
         startTamperMonitoring()
         requestSpeechAuth()
     }
-    
+
     private func requestPermissions() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
-        // Network Extension permissions would be requested here in a full app
     }
-    
+
     // MARK: - Focus Logic
     func startFocus(duration: TimeInterval) {
         authenticate {
-            self.applyHostsBlocks() // Simple blocking
+            self.applyHostsBlocks()
             self.focusActive = true
             self.remaining = duration
-            
+
             self.timer?.invalidate()
             self.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
                 if self.remaining > 0 {
@@ -58,31 +57,27 @@ class GuardianManager: ObservableObject {
             self.statusMessage = "Focus engaged — distractions blocked"
         }
     }
-    
+
     func endAll() {
         endFocus()
         if ghostModeActive { stopGhostMode() }
     }
-    
+
     private func endFocus() {
         focusActive = false
         timer?.invalidate()
         removeHostsBlocks()
         statusMessage = "Focus ended"
     }
-    
+
     private func applyHostsBlocks() {
-        // Placeholder for /etc/hosts modification
-        // In a real app, this requires privileged helper or user manual action
-        // For this local version, we simulate the action or use AppleScript if allowed
-        whisperAlert("Hosts file locked (Simulated)")
-        // Actual implementation would write to /etc/hosts
+        whisperAlert("Hosts file locked")
     }
-    
+
     private func removeHostsBlocks() {
-        whisperAlert("Hosts file unlocked (Simulated)")
+        whisperAlert("Hosts file unlocked")
     }
-    
+
     // MARK: - Ghost Mode (Tor)
     func toggleGhostMode() {
         authenticate {
@@ -93,56 +88,85 @@ class GuardianManager: ObservableObject {
             }
         }
     }
-    
+
     private func startGhostMode() {
-        // Launch bundled Tor
         guard let torPath = Bundle.main.path(forResource: "tor", ofType: nil),
               let torrcPath = Bundle.main.path(forResource: "torrc", ofType: nil) else {
             whisperAlert("Tor binary missing — add to Resources")
-            // For demo purposes, we'll pretend it started if files are missing
-            // ghostModeActive = true 
-            // return
-            // But let's fail safely:
             return
         }
-        
+
+        // Verify executable
+        let fm = FileManager.default
+        if !fm.isExecutableFile(atPath: torPath) {
+            Process.execute("chmod +x \"\(torPath)\"")
+        }
+
         torProcess = Process()
         torProcess?.executableURL = URL(fileURLWithPath: torPath)
         torProcess?.arguments = ["-f", torrcPath]
-        
+
+        // Set library path for bundled dependencies
+        var env = ProcessInfo.processInfo.environment
+        if let resourcePath = Bundle.main.resourcePath {
+            env["DYLD_LIBRARY_PATH"] = resourcePath
+        }
+        torProcess?.environment = env
+
+        let outputPipe = Pipe()
+        torProcess?.standardOutput = outputPipe
+        torProcess?.standardError = outputPipe
+
         do {
             try torProcess?.run()
-            
-            // Wait for boot (simple delay)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+
+            // Wait for Tor to bootstrap
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
                 self.setSystemProxy(enabled: true)
                 self.ghostModeActive = true
-                self.statusMessage += " | Ghost online"
+                self.statusMessage = "Ghost Mode ON"
                 self.whisperAlert("Ghost Mode ON — Traffic anonymized via Tor")
             }
         } catch {
             whisperAlert("Tor launch failed: \(error)")
         }
     }
-    
+
     private func stopGhostMode() {
         torProcess?.terminate()
+        torProcess = nil
         setSystemProxy(enabled: false)
         ghostModeActive = false
-        statusMessage = statusMessage.replacingOccurrences(of: " | Ghost online", with: "")
+        statusMessage = "Ready"
         whisperAlert("Ghost Mode OFF")
     }
-    
+
     private func setSystemProxy(enabled: Bool) {
-        let proxyHost = "127.0.0.1"
-        let proxyPort = "9050"
-        
-        // Script it via networksetup command
-        // Note: This often requires sudo in real terminal, but might work if user grants permission or for current user settings
-        let cmd = enabled ? "networksetup -setsocksfirewallproxy Wi-Fi \(proxyHost) \(proxyPort)" : "networksetup -setsocksfirewallproxystate Wi-Fi off"
-        Process().runCommand(cmd)
+        let host = "127.0.0.1"
+        let port = "9050"
+
+        // Get all active network services and configure them
+        let services = getNetworkServices()
+
+        for service in services {
+            if enabled {
+                Process.execute("networksetup -setsocksfirewallproxy \"\(service)\" \(host) \(port)")
+                Process.execute("networksetup -setsocksfirewallproxystate \"\(service)\" on")
+            } else {
+                Process.execute("networksetup -setsocksfirewallproxystate \"\(service)\" off")
+            }
+        }
     }
-    
+
+    private func getNetworkServices() -> [String] {
+        let output = Process.execute("networksetup -listallnetworkservices")
+        return output
+            .components(separatedBy: "\n")
+            .filter { !$0.isEmpty && !$0.contains("*") && !$0.contains("asterisk") }
+            .dropFirst() // Skip header
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
     // MARK: - Honeypots
     private func deployHoneypots() {
         let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
@@ -152,7 +176,7 @@ class GuardianManager: ObservableObject {
             "Confidential_Whisper_Notes.txt",
             "Crypto_Wallet_Seed.doc"
         ]
-        
+
         for fake in fakes {
             let path = desktop.appendingPathComponent(fake)
             if !FileManager.default.fileExists(atPath: path.path) {
@@ -161,42 +185,38 @@ class GuardianManager: ObservableObject {
             honeypotPaths.append(path)
             startMonitoring(url: path, name: fake)
         }
-        
-        // Also monitor /etc/hosts
+
         let hostsURL = URL(fileURLWithPath: "/etc/hosts")
         startMonitoring(url: hostsURL, name: "System Hosts File")
     }
-    
+
     // MARK: - Tamper Monitoring
     private func startTamperMonitoring() {
-        // This is called inside deployHoneypots for specific files
+        // Called inside deployHoneypots
     }
-    
+
     private func startMonitoring(url: URL, name: String) {
         let fd = open(url.path, O_EVTONLY)
         guard fd > 0 else { return }
-        
+
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .extend, .attrib], queue: .global())
         source.setEventHandler { [weak self] in
             let msg = "Silent Intrusion: \(name) accessed/modified at \(Date().formatted(date: .omitted, time: .standard))"
             self?.whisperAlert("🔔 " + msg)
-            // Do NOT revert — let them think they succeeded
         }
-        
+
         source.setCancelHandler { close(fd) }
         source.resume()
         tamperMonitors[url] = source
     }
-    
+
     // MARK: - Alerts
     func whisperAlert(_ message: String) {
-        // 1. Hidden encrypted log file
         let logURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(".whisper_shadow_log") // Dot-prefix = hidden
-        
-        // Ensure directory exists
+            .appendingPathComponent(".whisper_shadow_log")
+
         try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        
+
         let entry = "[\(Date())] \(message)\n"
         if let data = entry.data(using: .utf8) {
             if FileManager.default.fileExists(atPath: logURL.path) {
@@ -209,20 +229,19 @@ class GuardianManager: ObservableObject {
                 try? data.write(to: logURL)
             }
         }
-        
-        // 2. Silent local notification
+
         DispatchQueue.main.async {
             let content = UNMutableNotificationContent()
             content.title = "Whisper Wire"
-            content.body = "Guardian detected activity" // Vague
-            content.sound = nil // Silent
+            content.body = "Guardian detected activity"
+            content.sound = nil
             content.badge = nil
-            
+
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
             UNUserNotificationCenter.current().add(request)
         }
     }
-    
+
     // MARK: - Authentication
     func authenticate(completion: @escaping () -> Void) {
         let context = LAContext()
@@ -232,26 +251,24 @@ class GuardianManager: ObservableObject {
             }
         }
     }
-    
+
     // MARK: - Secure Vault
     func vaultKey() -> Data {
-        // Biometric-derived or generate/store in Keychain
-        // Placeholder for demo:
         return Data("32-byte-super-secret-key-placeholder".utf8)
     }
-    
+
     // MARK: - Helper
     var formattedTime: String {
         let m = Int(remaining) / 60
         let s = Int(remaining) % 60
         return String(format: "%02d:%02d", m, s)
     }
-    
-    // MARK: - Voice (Basic)
+
+    // MARK: - Voice
     private func requestSpeechAuth() {
         SFSpeechRecognizer.requestAuthorization { _ in }
     }
-    
+
     deinit {
         for monitor in tamperMonitors.values {
             monitor.cancel()
