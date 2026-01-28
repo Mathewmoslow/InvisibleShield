@@ -6,6 +6,33 @@ import Speech
 import Network
 import Combine
 
+// MARK: - Vault Errors
+enum VaultError: LocalizedError {
+    case notAuthenticated
+    case keyRetrievalFailed(KeychainError)
+    case encryptionFailed
+    case decryptionFailed
+    case fileWriteFailed(Error)
+    case fileReadFailed(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .notAuthenticated:
+            return "Please authenticate to access the vault."
+        case .keyRetrievalFailed(let keychainError):
+            return "Failed to retrieve encryption key: \(keychainError.errorDescription ?? "Unknown error")"
+        case .encryptionFailed:
+            return "Failed to encrypt data."
+        case .decryptionFailed:
+            return "Failed to decrypt data. The vault may be corrupted or the encryption key has changed."
+        case .fileWriteFailed(let error):
+            return "Failed to save vault: \(error.localizedDescription)"
+        case .fileReadFailed(let error):
+            return "Failed to read vault: \(error.localizedDescription)"
+        }
+    }
+}
+
 class GuardianManager: ObservableObject {
     static let shared = GuardianManager()
 
@@ -15,6 +42,14 @@ class GuardianManager: ObservableObject {
     @Published var remaining: TimeInterval = 0
     @Published var statusMessage = "Ready"
     @Published var showDefenseMode = false
+
+    // Error state for UI alerts
+    @Published var currentError: Error?
+    @Published var showErrorAlert = false
+
+    // MARK: - Dependencies
+    private let authManager = AuthenticationManager.shared
+    private let keychainManager = KeychainManager.shared
 
     // MARK: - Private Properties
     private var timer: Timer?
@@ -243,18 +278,78 @@ class GuardianManager: ObservableObject {
     }
 
     // MARK: - Authentication
+
+    /// Authenticates and executes the completion handler if successful
     func authenticate(completion: @escaping () -> Void) {
-        let context = LAContext()
-        context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Whisper Wire access") { success, _ in
-            if success {
-                DispatchQueue.main.async { completion() }
+        Task { @MainActor in
+            do {
+                _ = try await authManager.authenticate()
+                completion()
+            } catch {
+                self.handleError(error)
             }
         }
     }
 
+    /// Async version of authenticate
+    @MainActor
+    func authenticateAsync() async throws {
+        _ = try await authManager.authenticate()
+    }
+
+    /// Check if currently authenticated
+    var isAuthenticated: Bool {
+        authManager.state.isAuthenticated
+    }
+
+    /// Extend the current session (call on user activity)
+    func extendSession() {
+        authManager.extendSession()
+    }
+
+    /// Invalidate the current session
+    func invalidateSession() {
+        authManager.invalidateSession()
+    }
+
     // MARK: - Secure Vault
-    func vaultKey() -> Data {
-        return Data("32-byte-super-secret-key-placeholder".utf8)
+
+    /// Retrieves the vault encryption key (requires prior authentication)
+    /// - Throws: VaultError if not authenticated or key retrieval fails
+    func vaultKey() throws -> Data {
+        guard let context = authManager.authenticatedContext else {
+            throw VaultError.notAuthenticated
+        }
+
+        do {
+            return try keychainManager.getOrCreateVaultKey(context: context)
+        } catch let error as KeychainError {
+            throw VaultError.keyRetrievalFailed(error)
+        }
+    }
+
+    /// Async version that handles authentication flow
+    @MainActor
+    func getVaultKey() async throws -> Data {
+        let context = try await authManager.authenticate()
+
+        do {
+            return try keychainManager.getOrCreateVaultKey(context: context)
+        } catch let error as KeychainError {
+            throw VaultError.keyRetrievalFailed(error)
+        }
+    }
+
+    // MARK: - Error Handling
+
+    func handleError(_ error: Error) {
+        DispatchQueue.main.async {
+            self.currentError = error
+            self.showErrorAlert = true
+
+            // Log for debugging
+            self.whisperAlert("Error: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Helper
